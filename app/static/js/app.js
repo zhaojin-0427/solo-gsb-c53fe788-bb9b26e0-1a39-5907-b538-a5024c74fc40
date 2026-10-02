@@ -9,6 +9,9 @@ const state = {
   severities: new Set(["breaking", "undetermined"]),
   text: "",
   findingsById: new Map(),
+  coverageSide: "baseline",
+  coverageDocs: { baseline: null, candidate: null },
+  coverageFile: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -47,6 +50,19 @@ window.addEventListener("DOMContentLoaded", () => {
     state.view = b.dataset.view;
     render();
   }));
+  $$(".cov-side").forEach((b) => b.addEventListener("click", () => {
+    $$(".cov-side").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    state.coverageSide = b.dataset.side;
+    renderCoverage();
+  }));
+  $("#coverage-file").addEventListener("change", (e) => {
+    state.coverageFile = e.target.files[0] || null;
+    $("#btn-coverage-upload").disabled = !state.coverageFile;
+  });
+  $("#btn-coverage-upload").addEventListener("click", uploadCoverage);
+  $("#btn-coverage-export").addEventListener("click", exportCoverage);
+  $("#btn-coverage-delete").addEventListener("click", removeCoverage);
   $$("[data-export]").forEach((b) =>
     b.addEventListener("click", () => exportReport(b.dataset.export)));
   $("#btn-history").addEventListener("click", openHistory);
@@ -120,10 +136,12 @@ function loadReport(doc) {
   state.report = doc;
   state.analysisId = doc.analysis_id;
   state.findingsById = new Map(doc.findings.map((f) => [f.id, f]));
+  state.coverageDocs = { baseline: null, candidate: null };
   $("#panel-result").hidden = false;
   $("#analysis-id").textContent = "#" + doc.analysis_id;
   $("#fingerprint").textContent = doc.fingerprint || "";
   render();
+  loadCoverageSummaries();
   $("#panel-result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -141,8 +159,22 @@ function render() {
     s.engine_stats.cycles_terminated || 0;
 
   const findings = filteredFindings();
-  if (state.view === "endpoints") renderEndpoints(findings);
-  else renderFlat(findings);
+  if (state.view === "endpoints") {
+    $("#list-endpoints").hidden = false;
+    $("#list-findings").hidden = true;
+    $("#list-coverage").hidden = true;
+    renderEndpoints(findings);
+  } else if (state.view === "findings") {
+    $("#list-endpoints").hidden = true;
+    $("#list-findings").hidden = false;
+    $("#list-coverage").hidden = true;
+    renderFlat(findings);
+  } else {
+    $("#list-endpoints").hidden = true;
+    $("#list-findings").hidden = true;
+    $("#list-coverage").hidden = false;
+    renderCoverage();
+  }
 }
 
 function filteredFindings() {
@@ -559,6 +591,211 @@ function formatPtr(f, side) {
   if (!pointer) return "—";
   const sameFile = !file || file === state.report.packages[side]?.entry;
   return sameFile ? "#" + pointer : `${file}#${pointer}`;
+}
+
+// ----------------------------------------------------- call coverage
+const covOutcomeMeta = {
+  covered: { label: "已覆盖", cls: "cov-covered" },
+  validation_failed: { label: "校验失败", cls: "cov-failed" },
+  undetermined: { label: "无法判定", cls: "cov-undetermined" },
+  unmatched: { label: "未匹配", cls: "cov-unmatched" },
+  ambiguous: { label: "未归属", cls: "cov-ambiguous" },
+  excluded_media: { label: "非 JSON 排除", cls: "cov-excluded" },
+  invalid: { label: "行格式错误", cls: "cov-invalid" },
+};
+
+async function loadCoverageSummaries() {
+  try {
+    const data = await (await fetch(
+      `/api/analyses/${state.analysisId}/coverage`)).json();
+    for (const s of data.sides || []) {
+      if (s.available) {
+        // keep any already-loaded full doc; otherwise carry summary stub
+        state.coverageDocs[s.side] = state.coverageDocs[s.side] || {
+          summary: s.summary, source_file: s.source_file, __stub: true,
+        };
+      }
+    }
+    if (state.view === "coverage") renderCoverage();
+  } catch { /* coverage is optional; ignore summary fetch errors */ }
+}
+
+async function uploadCoverage() {
+  const side = state.coverageSide;
+  const file = state.coverageFile;
+  if (!file) return;
+  const btn = $("#btn-coverage-upload");
+  const err = $("#coverage-error");
+  err.textContent = "";
+  btn.disabled = true;
+  btn.textContent = "计算中…";
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const resp = await fetch(
+      `/api/analyses/${state.analysisId}/coverage/${side}`,
+      { method: "POST", body: fd });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.detail || `HTTP ${resp.status}`);
+    }
+    const doc = await resp.json();
+    state.coverageDocs[side] = doc;
+    renderCoverage();
+  } catch (exc) {
+    err.textContent = "上传/计算失败：" + exc.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "上传 NDJSON 计算覆盖";
+  }
+}
+
+async function ensureCoverageDoc(side) {
+  const existing = state.coverageDocs[side];
+  if (existing && !existing.__stub) return existing;
+  const resp = await fetch(
+    `/api/analyses/${state.analysisId}/coverage/${side}`);
+  if (!resp.ok) return null;
+  const doc = await resp.json();
+  state.coverageDocs[side] = doc;
+  return doc;
+}
+
+async function renderCoverage() {
+  const side = state.coverageSide;
+  $$(".cov-side").forEach((b) =>
+    b.classList.toggle("active", b.dataset.side === side));
+  const body = $("#coverage-body");
+  body.innerHTML = `<p class="hint">加载中…</p>`;
+  const doc = await ensureCoverageDoc(side);
+  if (!doc) {
+    body.innerHTML = `<p class="hint">尚未为${side === "baseline" ? "基线" : "候选"}上传调用记录（NDJSON）。
+      选择文件后点击「上传 NDJSON 计算覆盖」。</p>`;
+  } else {
+    body.innerHTML = coverageHtml(doc);
+  }
+  const has = !!doc;
+  $("#btn-coverage-export").hidden = !has;
+  $("#btn-coverage-delete").hidden = !has;
+}
+
+function coverageHtml(doc) {
+  const s = doc.summary || {};
+  const denomNote = s.cells_total === 0
+    ? `<span class="cov-na-pill">无适用格</span>` : "";
+  const rate = s.cells_total
+    ? Math.round((s.cells_covered / s.cells_total) * 100) : 0;
+  const cards = [
+    ["已覆盖格 / 总格", `${s.cells_covered} / ${s.cells_total}`, rate],
+    ["覆盖缺口", s.cells_gap, null],
+    ["覆盖调用", s.calls_covered, null],
+    ["校验失败", s.calls_validation_failed, null],
+    ["无法判定", s.calls_undetermined, null],
+    ["未匹配", s.calls_unmatched, null],
+    ["未归属(多模板)", s.calls_ambiguous, null],
+    ["非 JSON 排除", s.calls_excluded_media, null],
+    ["行格式错误", s.calls_invalid, null],
+  ];
+  const cardsHtml = cards.map(([label, num, pct]) => `
+    <div class="cov-stat">
+      <span class="cov-stat-num">${num ?? 0}${pct !== null ? `<small>${pct}%</small>` : ""}</span>
+      <span class="cov-stat-label">${label}</span>
+    </div>`).join("");
+
+  const ops = (doc.operations || []).map((op) => {
+    if (!op.applicable) {
+      return `<div class="cov-op">
+        <div class="cov-op-head">
+          <span class="method ${methodClass(op.method)}">${op.method}</span>
+          <span class="ep-path">${escapeHtml(op.path)}</span>
+          ${op.operation_id ? `<span class="ep-opid">${escapeHtml(op.operation_id)}</span>` : ""}
+          <span class="cov-na-pill">无适用格</span>
+        </div>
+        ${(op.excluded_media || []).length
+          ? `<div class="cov-op-note">非 JSON 媒体不生成格：${op.excluded_media
+              .map((m) => `<code>${m.status} ${escapeHtml(m.media_type)}</code>`)
+              .join("、")}</div>` : ""}
+      </div>`;
+    }
+    const cell = (c, isGap) => `
+      <div class="cov-cell ${isGap ? "cov-cell-gap" : "cov-cell-ok"}"
+           title="${isGap ? "缺口（未覆盖）" : `由第 ${c.covered_by_line} 行调用覆盖`}">
+        <span class="cov-cell-status">${escapeHtml(c.status)}</span>
+        <span class="cov-cell-mt">${c.kind === "no_content"
+          ? "无实体响应" : escapeHtml(c.media_type)}</span>
+        <span class="cov-cell-mark">${isGap ? "○ 缺口" : `● 第${c.covered_by_line}行`}</span>
+      </div>`;
+    const covered = (op.cells || []).map((c) => cell(c, false)).join("");
+    const gaps = (op.gaps || []).map((c) => cell(c, true)).join("");
+    return `<div class="cov-op">
+      <div class="cov-op-head">
+        <span class="method ${methodClass(op.method)}">${op.method}</span>
+        <span class="ep-path">${escapeHtml(op.path)}</span>
+        ${op.operation_id ? `<span class="ep-opid">${escapeHtml(op.operation_id)}</span>` : ""}
+        <span class="cov-op-progress">${op.covered} / ${op.total} 格</span>
+      </div>
+      <div class="cov-cells">${covered}${gaps}</div>
+      ${(op.excluded_media || []).length
+        ? `<div class="cov-op-note">非 JSON 媒体不生成格：${op.excluded_media
+            .map((m) => `<code>${m.status} ${escapeHtml(m.media_type)}</code>`)
+            .join("、")}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const rows = (doc.rows || []).map((r) => {
+    const meta = covOutcomeMeta[r.outcome] || { label: r.outcome, cls: "" };
+    return `<tr>
+      <td class="cov-line">${r.line}</td>
+      <td><span class="cov-badge ${meta.cls}">${meta.label}</span></td>
+      <td><span class="method ${methodClass(r.method || "")}">${escapeHtml(r.method || "—")}</span>
+          <code>${escapeHtml(r.path || "—")}</code></td>
+      <td>${r.status ? escapeHtml(r.status) : "—"}</td>
+      <td>${r.operation && r.matched_template && r.matched_template !== r.path
+        ? `→ <code>${escapeHtml(r.matched_template)}</code>`
+        : r.cell ? `<code>${escapeHtml(r.cell.replace("|", " · "))}</code>` : ""}</td>
+      <td class="cov-reasons">${(r.reasons || []).map(escapeHtml)
+          .join("<br>")}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="cov-meta">
+      来源文件 <code>${escapeHtml(doc.source_file || "calls.ndjson")}</code>
+      · 操作 ${s.operations_applicable}/${s.operations_total} 有适用格
+      ${denomNote}
+    </div>
+    <div class="cov-stat-grid">${cardsHtml}</div>
+    <h4 class="cov-section-title">覆盖矩阵与缺口</h4>
+    <div class="cov-ops">${ops || `<p class="hint">该文档没有任何操作。</p>`}</div>
+    <h4 class="cov-section-title">逐行判定（未匹配 / 失败 / 无法判定均含原因）</h4>
+    <div class="cov-rows-wrap">
+      <table class="cov-rows">
+        <thead><tr><th>行</th><th>结局</th><th>调用</th><th>状态码</th><th>归属</th><th>原因</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function exportCoverage() {
+  const side = state.coverageSide;
+  const a = document.createElement("a");
+  a.href = `/api/analyses/${state.analysisId}/coverage/${side}/export`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function removeCoverage() {
+  const side = state.coverageSide;
+  if (!confirm(`确定删除${side === "baseline" ? "基线" : "候选"}侧的调用覆盖结果？`)) return;
+  const resp = await fetch(
+    `/api/analyses/${state.analysisId}/coverage/${side}`,
+    { method: "DELETE" });
+  if (resp.ok) {
+    state.coverageDocs[side] = null;
+    renderCoverage();
+  }
 }
 
 // ------------------------------------------------------------- export

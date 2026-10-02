@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from ..analysis import analyze, filter_report, from_envelope
 from ..config import settings
 from ..services.loader import PackageError
+from ..services.coverage import CoverageError, build_coverage
 from ..services.replay import replay
 from ..store import store
 
 router = APIRouter(prefix="/api")
 
 SEVERITY_VALUES = {"breaking", "undetermined", "compatible"}
+COVERAGE_SIDES = ("baseline", "candidate")
 
 
 @router.get("/health")
@@ -108,6 +110,13 @@ def export_analysis(analysis_id: str, severity: str | None = None):
     sev = _parse_severity(severity)
     if sev != SEVERITY_VALUES:
         doc = filter_report(doc, sev)
+    coverage = store.get_coverage(analysis_id) or {}
+    if coverage.get("baseline") is not None or \
+            coverage.get("candidate") is not None:
+        doc = dict(doc)
+        doc["call_coverage"] = {
+            side: coverage[side] for side in COVERAGE_SIDES
+            if coverage.get(side) is not None}
     payload = _dumps_deterministic(doc)
     suffix = "all" if sev == SEVERITY_VALUES else "-".join(sorted(sev))
     filename = f"contract-report-{analysis_id}-{suffix}.json"
@@ -174,3 +183,108 @@ def _dumps_deterministic(doc) -> str:
 def _fingerprint(payload: str) -> str:
     import hashlib
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------- 调用覆盖
+@router.post("/analyses/{analysis_id}/coverage/{side}", status_code=201)
+async def upload_coverage(analysis_id: str, side: str, file: UploadFile):
+    if side not in COVERAGE_SIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知文档侧 {side!r}，可选 baseline/candidate")
+    record = store.get(analysis_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="分析不存在")
+    packages = store.get_packages(analysis_id)
+    if not packages:
+        raise HTTPException(status_code=409,
+                            detail="原始文档包不可用，无法计算调用覆盖")
+    raw = await file.read()
+    _check_size(file.filename, raw)
+    pkg = from_envelope(packages[side])
+    try:
+        doc = build_coverage(pkg, side, raw,
+                             source_file=file.filename or "calls.ndjson")
+    except CoverageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # defensive: surface engine bugs as 422
+        raise HTTPException(status_code=422,
+                            detail=f"调用覆盖计算失败: "
+                                   f"{exc.__class__.__name__}: {exc}")
+    store.save_coverage(analysis_id, side, doc)
+    body = dict(doc)
+    body["stored"] = True
+    body["storage"] = store.status()
+    return body
+
+
+@router.get("/analyses/{analysis_id}/coverage")
+def list_coverage(analysis_id: str):
+    if not store.get(analysis_id):
+        raise HTTPException(status_code=404, detail="分析不存在")
+    coverage = store.get_coverage(analysis_id) or {}
+    out = []
+    for side in COVERAGE_SIDES:
+        doc = coverage.get(side)
+        out.append({
+            "side": side,
+            "available": doc is not None,
+            "source_file": doc.get("source_file") if doc else None,
+            "summary": doc.get("summary") if doc else None,
+        })
+    return {"analysis_id": analysis_id, "sides": out,
+            "storage": store.status()}
+
+
+@router.get("/analyses/{analysis_id}/coverage/{side}")
+def get_coverage(analysis_id: str, side: str):
+    if side not in COVERAGE_SIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知文档侧 {side!r}，可选 baseline/candidate")
+    if not store.get(analysis_id):
+        raise HTTPException(status_code=404, detail="分析不存在")
+    coverage = store.get_coverage(analysis_id) or {}
+    doc = coverage.get(side)
+    if doc is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该分析尚未上传{side}侧调用覆盖")
+    return doc
+
+
+@router.delete("/analyses/{analysis_id}/coverage/{side}", status_code=200)
+def delete_coverage(analysis_id: str, side: str):
+    if side not in COVERAGE_SIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知文档侧 {side!r}，可选 baseline/candidate")
+    if not store.get(analysis_id):
+        raise HTTPException(status_code=404, detail="分析不存在")
+    coverage = store.get_coverage(analysis_id) or {}
+    if coverage.get(side) is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该分析尚未上传{side}侧调用覆盖")
+    store.delete_coverage(analysis_id, side)
+    return {"deleted": analysis_id, "side": side}
+
+
+@router.get("/analyses/{analysis_id}/coverage/{side}/export")
+def export_coverage(analysis_id: str, side: str):
+    if side not in COVERAGE_SIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知文档侧 {side!r}，可选 baseline/candidate")
+    if not store.get(analysis_id):
+        raise HTTPException(status_code=404, detail="分析不存在")
+    coverage = store.get_coverage(analysis_id) or {}
+    doc = coverage.get(side)
+    if doc is None:
+        raise HTTPException(status_code=404,
+                            detail=f"该分析尚未上传{side}侧调用覆盖")
+    payload = _dumps_deterministic(doc)
+    filename = f"call-coverage-{analysis_id}-{side}.json"
+    return Response(
+        content=payload, media_type="application/json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{filename}"',
+                 "X-Coverage-Fingerprint": _fingerprint(payload)})

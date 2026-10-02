@@ -260,3 +260,72 @@ code { font-family: var(--mono); background: var(--panel-2); padding: 1px 6px;
   .upload-grid { grid-template-columns: 1fr; }
   .upload-arrow { transform: rotate(90deg); }
 }
+
+/* ============================================================ call coverage */
+.coverage-view { margin-top: 6px; }
+.coverage-toolbar { display: flex; justify-content: space-between;
+  align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+.coverage-sides { display: flex; gap: 6px; }
+.cov-side.active { background: var(--primary); border-color: var(--primary);
+  color: #fff; }
+.coverage-upload { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.coverage-upload input[type=file] { color: var(--muted); font-size: 12.5px;
+  max-width: 260px; }
+.cov-meta { font-size: 12.5px; color: var(--muted); margin: 4px 0 12px; }
+.cov-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px; margin-bottom: 18px; }
+.cov-stat { background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 10px 14px; display: flex; flex-direction: column;
+  gap: 2px; }
+.cov-stat-num { font-size: 21px; font-weight: 700; }
+.cov-stat-num small { font-size: 12px; color: var(--compatible);
+  font-weight: 600; margin-left: 6px; }
+.cov-stat-label { font-size: 11.5px; color: var(--muted); }
+.cov-section-title { margin: 18px 0 8px; font-size: 13px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+
+.cov-op { border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel-2); margin-bottom: 8px; padding: 10px 14px; }
+.cov-op-head { display: flex; align-items: center; gap: 10px; }
+.cov-op-progress { margin-left: auto; font-size: 12px; color: var(--muted);
+  font-family: var(--mono); }
+.cov-na-pill { font-size: 11px; padding: 2px 9px; border-radius: 999px;
+  background: var(--panel); color: var(--muted); border: 1px dashed var(--border);
+  margin-left: auto; font-weight: 600; }
+.cov-op-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+.cov-cells { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.cov-cell { border-radius: 8px; padding: 7px 11px; min-width: 150px;
+  display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; }
+.cov-cell-status { font-family: var(--mono); font-weight: 700; font-size: 12.5px; }
+.cov-cell-mt { color: var(--muted); font-family: var(--mono); }
+.cov-cell-mark { font-weight: 600; margin-top: 2px; }
+.cov-cell-ok { background: var(--compatible-bg); border: 1px solid rgba(53,196,111,.4);
+  color: var(--compatible); }
+.cov-cell-gap { background: var(--breaking-bg); border: 1px dashed rgba(255,93,108,.45);
+  color: var(--breaking); }
+
+.cov-rows-wrap { overflow-x: auto; border: 1px solid var(--border);
+  border-radius: 9px; }
+.cov-rows { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.cov-rows th { text-align: left; padding: 8px 12px; background: var(--panel-2);
+  color: var(--muted); font-weight: 600; font-size: 11.5px;
+  border-bottom: 1px solid var(--border); white-space: nowrap; }
+.cov-rows td { padding: 7px 12px; border-bottom: 1px solid rgba(42,53,80,.5);
+  vertical-align: top; }
+.cov-rows tr:last-child td { border-bottom: none; }
+.cov-line { color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+.cov-reasons { color: var(--muted); max-width: 420px; }
+.cov-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  font-weight: 600; white-space: nowrap; }
+.cov-covered { background: var(--compatible-bg); color: var(--compatible);
+  border: 1px solid rgba(53,196,111,.35); }
+.cov-failed { background: var(--breaking-bg); color: var(--breaking);
+  border: 1px solid rgba(255,93,108,.35); }
+.cov-undetermined { background: var(--undetermined-bg); color: var(--undetermined);
+  border: 1px solid rgba(245,166,35,.35); }
+.cov-unmatched, .cov-ambiguous { background: rgba(147,160,187,.14);
+  color: var(--muted); border: 1px solid var(--border); }
+.cov-excluded { background: rgba(143,107,255,.14); color: #b39bff;
+  border: 1px solid rgba(143,107,255,.3); }
+.cov-invalid { background: var(--breaking-bg); color: var(--breaking);
+  border: 1px solid rgba(255,93,108,.35); }

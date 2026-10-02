@@ -87,11 +87,38 @@
         <div class="view-toggle">
           <button class="btn btn-sm tab active" data-view="endpoints">按端点</button>
           <button class="btn btn-sm tab" data-view="findings">扁平列表</button>
+          <button class="btn btn-sm tab" data-view="coverage">调用覆盖</button>
         </div>
       </div>
 
       <div id="list-endpoints" class="endpoint-list"></div>
       <div id="list-findings" class="finding-table" hidden></div>
+
+      <!-- ===================== call coverage view ===================== -->
+      <div id="list-coverage" class="coverage-view" hidden>
+        <div class="coverage-toolbar">
+          <div class="coverage-sides" role="group" aria-label="选择文档侧">
+            <button class="btn btn-sm cov-side active" data-side="baseline">基线 baseline</button>
+            <button class="btn btn-sm cov-side" data-side="candidate">候选 candidate</button>
+          </div>
+          <div class="coverage-upload">
+            <input type="file" id="coverage-file" accept=".ndjson,.jsonl,.json,.txt" />
+            <button id="btn-coverage-upload" class="btn btn-primary btn-sm" disabled>上传 NDJSON 计算覆盖</button>
+            <button id="btn-coverage-export" class="btn btn-ghost btn-sm" hidden>⬇ 导出覆盖 JSON</button>
+            <button id="btn-coverage-delete" class="btn btn-ghost btn-sm" hidden>删除</button>
+            <span id="coverage-error" class="error-text"></span>
+          </div>
+        </div>
+        <p class="hint" style="margin:8px 0 14px">
+          每行一个调用对象：<code>method</code>、<code>path</code>、<code>query</code>、
+          <code>headers</code>、<code>cookies</code>，<code>request</code>/<code>response</code>
+          含 <code>media_type</code> 与 JSON <code>body</code>（缺省 <code>body</code> 表示无实体），
+          <code>response</code> 含整数 <code>status</code>。路径先精确后唯一模板；
+          覆盖格 = 响应状态码 × JSON 媒体类型（无 content 单列），仅在请求参数 / 请求体 /
+          响应体可判定约束均通过时计入覆盖。
+        </p>
+        <div id="coverage-body"></div>
+      </div>
     </section>
   </main>
 

@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS analysis_packages (
     baseline    JSONB NOT NULL,
     candidate   JSONB NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS analysis_coverage (
+    id          TEXT PRIMARY KEY
+                REFERENCES analyses(id) ON DELETE CASCADE,
+    baseline    JSONB,
+    candidate   JSONB,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -198,6 +206,63 @@ class Database:
         except Exception as exc:
             self.last_error = str(exc)
             return None
+
+    def save_coverage(self, analysis_id: str, side: str,
+                      doc: dict) -> bool:
+        if not self.available:
+            return False
+        col = "baseline" if side == "baseline" else "candidate"
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO analysis_coverage (id, {col}, updated_at)
+                        VALUES (%s, %s, now())
+                        ON CONFLICT (id) DO UPDATE SET
+                            {col} = EXCLUDED.{col},
+                            updated_at = now()
+                        """,
+                        (analysis_id, Json(doc)))
+                conn.commit()
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+
+    def get_coverage(self, analysis_id: str) -> Optional[dict[str, Any]]:
+        if not self.available:
+            return None
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT baseline, candidate FROM analysis_coverage "
+                        "WHERE id = %s", (analysis_id,))
+                    r = cur.fetchone()
+            if not r:
+                return None
+            return {"baseline": r[0], "candidate": r[1]}
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+    def delete_coverage(self, analysis_id: str, side: str) -> bool:
+        if not self.available:
+            return False
+        col = "baseline" if side == "baseline" else "candidate"
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE analysis_coverage SET {col} = NULL, "
+                        f"updated_at = now() WHERE id = %s",
+                        (analysis_id,))
+                conn.commit()
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
 
     def status(self) -> dict:
         return {"available": self.available, "error": self.last_error}

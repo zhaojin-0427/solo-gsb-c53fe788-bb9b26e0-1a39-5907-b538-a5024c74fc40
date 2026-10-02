@@ -29,6 +29,9 @@ requestBody 被删除（`PARAMETER_MADE_REQUIRED` / `PARAMETER_ADDED_REQUIRED` /
 - `pattern`、`not`、`if/then/else`、`contains`、`prefixItems` 等
   **未支持的关键字一律标记为“无法判定”**，绝不静默忽略；
 - 结果可按严重度（破坏性 / 无法判定 / 兼容）筛选，按端点分组或扁平浏览；
+- **调用覆盖视图**：上传 NDJSON 调用记录，按「响应状态码 × JSON 媒体类型」
+  生成覆盖格，展示已覆盖格/总格与缺口，未匹配 / 校验失败 / 无法判定逐行列明
+  原因，结果随分析保存并确定性导出；
 - **确定性 JSON 导出**（键排序、无多余空白），响应头携带 SHA-256 指纹；
 - PostgreSQL 持久化分析记录与原始文档包（用于反例重放）；数据库不可用时
   自动降级为进程内存储；
@@ -50,6 +53,10 @@ docker compose up --build
 
 `docker compose down` 停止；加 `-v` 同时删除数据库卷。
 
+一键启动后，可在页面「比对结果 → **调用覆盖**」标签中选择**基线**或**候选**侧、
+上传 NDJSON 调用记录，查看覆盖矩阵与缺口，或直接用下文的 HTTP API 上传/查询/导出。
+
+
 ### 上传内容
 
 - 单个 `.yaml / .yml / .json` OpenAPI 文档；
@@ -59,6 +66,8 @@ docker compose up --build
 仓库 `examples/baseline` 与 `examples/candidate` 是一份刻意包含各类变化的示例
 （跨文件引用、`allOf`、`oneOf`、循环引用、枚举收窄/放宽、nullable、
 `pattern` 未支持关键字等），可将两个目录分别打成 ZIP 后上传。
+`examples/calls-baseline.ndjson` 是配套的调用记录示例，供「调用覆盖」功能上传
+（也可用 `curl -F file=@...` 直接提交，见下文「调用覆盖」）。
 
 ## 本地开发（不使用 Docker）
 
@@ -86,8 +95,13 @@ pytest -q
 | `POST` | `/api/analyses` | multipart 上传 `baseline`、`candidate`，创建分析 |
 | `GET` | `/api/analyses` | 历史分析列表 |
 | `GET` | `/api/analyses/{id}` | 获取完整报告 |
-| `GET` | `/api/analyses/{id}/export?severity=breaking,undetermined` | 确定性 JSON 导出（可按严重度筛选） |
+| `GET` | `/api/analyses/{id}/export?severity=breaking,undetermined` | 确定性 JSON 导出（可按严重度筛选；含已保存的调用覆盖） |
 | `POST` | `/api/analyses/{id}/findings/{fid}/replay` | 对反例（可在 body 中用 `{"instance": ...}` 覆盖）做双侧校验重放 |
+| `POST` | `/api/analyses/{id}/coverage/{side}` | 上传 NDJSON 调用记录，计算 `baseline`/`candidate` 侧调用覆盖 |
+| `GET` | `/api/analyses/{id}/coverage` | 查询两侧调用覆盖的可用性与汇总 |
+| `GET` | `/api/analyses/{id}/coverage/{side}` | 获取某侧完整调用覆盖文档（矩阵、缺口、逐行原因） |
+| `GET` | `/api/analyses/{id}/coverage/{side}/export` | 确定性导出某侧调用覆盖 JSON（带 SHA-256 指纹头） |
+| `DELETE` | `/api/analyses/{id}/coverage/{side}` | 删除某侧调用覆盖结果 |
 | `DELETE` | `/api/analyses/{id}` | 删除分析 |
 | `GET` | `/api/health` | 服务与存储状态 |
 
@@ -95,6 +109,134 @@ pytest -q
 
 - `Content-Disposition: attachment; filename="contract-report-<id>-<severity>.json"`
 - `X-Report-Fingerprint: <sha256>`（与导出字节一一对应，可用于校验确定性）
+
+## 调用覆盖（Call Coverage）
+
+在已有分析上选择**基线或候选**一侧文档，上传一份 **NDJSON**（每行一个 JSON 对象）
+调用记录，引擎把每个调用归并到该侧 operation 的某个**响应覆盖格**，统计
+「已覆盖格 / 总格」与缺口，并对未匹配、校验失败、无法判定**逐行给出原因**。
+结果随分析一起持久化，并可确定性导出。
+
+### NDJSON 行格式
+
+每行一个 JSON 对象：
+
+| 字段 | 说明 |
+| --- | --- |
+| `method` | HTTP 方法（大小写不敏感） |
+| `path` | 具体请求路径，以 `/` 开头（不含 query） |
+| `query` / `headers` / `cookies` | 参数键值对象，可省略（默认 `{}`） |
+| `request` | 请求描述：`media_type` + `body`；**缺省 `body` 键表示无请求实体** |
+| `response` | 响应描述：整数（或数字字符串）`status`、可选 `media_type` 与 JSON `body`；**缺省 `body` 键表示无响应实体** |
+
+请求/响应头的参数名按 HTTP 惯例**大小写不敏感**匹配，query/cookie 名大小写敏感；
+query/header/cookie/path 的文本值会按参数 schema 尝试标量 coerce（如 `"10"`→整数）。
+
+仓库自带示例 `examples/calls-baseline.ndjson`（覆盖、失败、未匹配、非 JSON 排除各若干行）。
+
+### 归属与覆盖规则
+
+1. **路径匹配**：先匹配精确路径；精确路径存在但不支持该方法 → 未匹配；
+   否则在声明了该方法的路径模板中做结构匹配（字面段全等、`{var}` 段非空），
+   **唯一命中**才归属；同时命中多个模板 → **未归属（ambiguous）**。
+2. **覆盖格**：每个 operation 的格为「响应状态码 × JSON 媒体类型」；无 `content`
+   的响应单列一个**无实体格**。状态码依次匹配 **精确值 → `1XX`…`5XX` 范围键 →
+   `default`**。非 JSON 媒体类型（如 `application/xml`、`text/csv`）不生成格，
+   调用携带这些媒体时记「非 JSON 媒体排除」并在 operation 上列明。
+   JSON 媒体指 `application/json` 及 `*/*+json`（如 `application/vnd.api+json`）。
+3. **判定**：仅当**请求参数**（必填存在性 + schema）、**请求体**（required、
+   content 媒体类型、body schema）、**响应体**（status 归属、content 与实体一致性、
+   body schema）的**可判定约束全部通过**时才覆盖该格；任一 schema 无法解析/含循环
+   → **无法判定**（不给覆盖）；任一约束失败 → **校验失败**。
+4. **零分母**：一个 operation 只有非 JSON 媒体（或无任何可覆盖格）时标记
+   **「无适用格」**，不参与覆盖率分母。
+
+### 实际请求与响应示例
+
+针对示例文档包创建分析后，对**基线**侧上传调用记录：
+
+```bash
+curl -s -X POST http://localhost:8000/api/analyses \
+  -F baseline=@examples/baseline.zip \
+  -F candidate=@examples/candidate.zip -o /tmp/report.json
+
+AID=$(python3 -c "import json;print(json.load(open('/tmp/report.json'))['analysis_id'])")
+
+curl -s -X POST "http://localhost:8000/api/analyses/$AID/coverage/baseline" \
+  -F file=@examples/calls-baseline.ndjson
+```
+
+上传体是 multipart（字段名 `file`）。响应（节选）形如：
+
+```json
+{
+  "schema_version": "1.0",
+  "analysis_side": "baseline",
+  "source_file": "calls-baseline.ndjson",
+  "summary": {
+    "operations_total": 5, "operations_applicable": 5,
+    "operations_without_cells": 0,
+    "cells_total": 7, "cells_covered": 6, "cells_gap": 1,
+    "calls_total": 10, "calls_covered": 6,
+    "calls_validation_failed": 2, "calls_undetermined": 0,
+    "calls_unmatched": 1, "calls_ambiguous": 0,
+    "calls_excluded_media": 1, "calls_invalid": 0
+  },
+  "operations": [
+    {
+      "path": "/pets/{petId}", "method": "GET", "applicable": true,
+      "covered": 2, "total": 2,
+      "cells": [
+        {"key": "200|application/json", "status": "200", "kind": "content",
+         "media_type": "application/json", "covered": true,
+         "covered_by_line": 3},
+        {"key": "404|(no content)", "status": "404", "kind": "no_content",
+         "media_type": null, "covered": true, "covered_by_line": 4}
+      ],
+      "gaps": [], "excluded_media": []
+    }
+  ],
+  "rows": [
+    {"line": 1, "outcome": "covered", "method": "GET", "path": "/pets",
+     "status": "200", "operation": "GET /pets",
+     "matched_template": "/pets", "cell": "200|application/json",
+     "resolved_status": "200", "reasons": []},
+    {"line": 7, "outcome": "validation_failed", "method": "GET",
+     "path": "/pets", "status": "200", "operation": "GET /pets",
+     "matched_template": "/pets", "cell": null,
+     "reasons": ["查询参数 'status'不满足契约约束: #: 值不在枚举 [...] 中"]},
+    {"line": 8, "outcome": "unmatched", "method": "GET",
+     "path": "/unknown/path", "status": "200", "operation": null,
+     "matched_template": null, "cell": null,
+     "reasons": ["没有路径模板匹配 GET /unknown/path"]}
+  ]
+}
+```
+
+`outcome` 取值：`covered` / `validation_failed` / `undetermined` /
+`unmatched` / `ambiguous`（多模板未归属）/ `excluded_media` / `invalid`
+（行本身不是合法 NDJSON 调用对象）。整份文件没有任何可解析行时返回 `400`。
+
+查询与导出：
+
+```bash
+# 两侧可用性 + 汇总
+curl -s "http://localhost:8000/api/analyses/$AID/coverage"
+
+# 某侧完整文档
+curl -s "http://localhost:8000/api/analyses/$AID/coverage/baseline"
+
+# 确定性导出（键排序、无多余空白），指纹在响应头
+curl -s -D - "http://localhost:8000/api/analyses/$AID/coverage/baseline/export" \
+  -o coverage-baseline.json
+# X-Coverage-Fingerprint: <sha256>
+
+# 已保存的覆盖同时内嵌进分析总导出 call_coverage 字段
+curl -s "http://localhost:8000/api/analyses/$AID/export" -o report.json
+```
+
+重复上传同一侧会**替换**旧结果；`DELETE` 删除指定侧；分析被删除时其覆盖一并删除。
+相同 NDJSON 输入永远产生字节一致的导出（含逐行原因，覆盖格只记录最早一行覆盖调用）。
 
 ## 判定规则（方向：基线 → 候选）
 
@@ -182,14 +324,15 @@ app/
     endpointrequest.py   # 端点级最小 JSON 请求构造与基线请求约束核对
     structuralreplay.py  # 结构性 finding（参数/请求体/状态码/媒体类型增删）的结构化反例与语义重放
     comparator.py        # 兼容性比较引擎与最小反例综合
+    coverage.py          # 调用覆盖：NDJSON 解析、路径归属、参数/请求体/响应体约束核对、覆盖格
     replay.py            # 双侧重放校验（模式级 + 端点级）
     rules.py             # 规则目录与严重度
   analysis.py            # 编排：加载→比较→序列化→存储
   serialization.py       # 确定性 JSON 导出
-  db.py / store.py       # PostgreSQL 持久化 + 内存降级
+  db.py / store.py       # PostgreSQL 持久化 + 内存降级（含调用覆盖）
   static/                # 原生 JS 前端（无框架、无构建步骤）
-examples/                # 基线 / 候选示例文档包
-tests/                   # pytest（引擎/循环 27 项 + API 25 项）
+examples/                # 基线 / 候选示例文档包 + calls-baseline.ndjson 调用记录
+tests/                   # pytest（引擎/循环 27 项 + API 25 项 + 调用覆盖 19 项）
 ```
 
 ## 说明与边界

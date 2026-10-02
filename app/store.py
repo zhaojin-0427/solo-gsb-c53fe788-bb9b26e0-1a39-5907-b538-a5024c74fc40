@@ -17,6 +17,7 @@ class _MemoryStore:
         self._lock = threading.Lock()
         self._analyses: dict[str, dict] = {}
         self._packages: dict[str, dict] = {}
+        self._coverage: dict[str, dict] = {}
 
     @property
     def available(self) -> bool:
@@ -53,11 +54,28 @@ class _MemoryStore:
         with self._lock:
             return self._packages.get(analysis_id)
 
+    def save_coverage(self, analysis_id: str, side: str, doc: dict) -> None:
+        with self._lock:
+            entry = self._coverage.setdefault(analysis_id, {})
+            entry[side] = doc
+
+    def get_coverage(self, analysis_id: str) -> Optional[dict]:
+        with self._lock:
+            entry = self._coverage.get(analysis_id)
+            return dict(entry) if entry else None
+
+    def delete_coverage(self, analysis_id: str, side: str) -> None:
+        with self._lock:
+            entry = self._coverage.get(analysis_id)
+            if entry:
+                entry.pop(side, None)
+
     def delete(self, analysis_id: str) -> bool:
         with self._lock:
             existed = analysis_id in self._analyses
             self._analyses.pop(analysis_id, None)
             self._packages.pop(analysis_id, None)
+            self._coverage.pop(analysis_id, None)
         return existed
 
 
@@ -125,6 +143,25 @@ class Store:
         if self.db.available:
             return self.db.get_packages(analysis_id)
         return _memory.get_packages(analysis_id)
+
+    def save_coverage(self, analysis_id: str, side: str, doc: dict) -> None:
+        if self.db.available:
+            ok = self.db.save_coverage(analysis_id, side, doc)
+            if not ok:
+                _memory.save_coverage(analysis_id, side, doc)
+        else:
+            _memory.save_coverage(analysis_id, side, doc)
+
+    def get_coverage(self, analysis_id: str) -> Optional[dict]:
+        if self.db.available:
+            return self.db.get_coverage(analysis_id)
+        return _memory.get_coverage(analysis_id)
+
+    def delete_coverage(self, analysis_id: str, side: str) -> None:
+        if self.db.available:
+            self.db.delete_coverage(analysis_id, side)
+        else:
+            _memory.delete_coverage(analysis_id, side)
 
     def delete(self, analysis_id: str) -> bool:
         if self.db.available:
