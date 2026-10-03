@@ -93,6 +93,99 @@
       <div id="list-endpoints" class="endpoint-list"></div>
       <div id="list-findings" class="finding-table" hidden></div>
     </section>
+
+    <!-- ===================== call coverage panel ===================== -->
+    <section id="panel-coverage" class="panel" hidden>
+      <div class="result-head">
+        <h2>3. 调用覆盖 <small id="coverage-sub"></small></h2>
+        <div class="export-group">
+          <label class="export-label">确定性导出：</label>
+          <button class="btn btn-ghost btn-sm" id="btn-export-coverage">
+            覆盖 JSON</button>
+        </div>
+      </div>
+      <p class="hint">
+        上传 NDJSON 调用记录（每行一次调用：<code>method</code> / <code>path</code> /
+        <code>query</code> / <code>headers</code> / <code>cookies</code>，
+        <code>request</code> / <code>response</code> 含 <code>media_type</code> 与 JSON
+        <code>body</code>，<code>response</code> 含 <code>status</code>；缺省 body 表示无实体），
+        按所选文档侧把调用归并到 operation：先匹配精确路径，再匹配唯一模板，多模板命中记未归属；
+        仅当请求参数、请求体、响应体的可判定约束均通过时覆盖对应格。
+      </p>
+      <div class="coverage-upload">
+        <div class="side-toggle" role="group" aria-label="选择文档侧">
+          <button class="btn btn-sm cside active" data-side="baseline"
+                  type="button">按基线文档</button>
+          <button class="btn btn-sm cside" data-side="candidate"
+                  type="button">按候选文档</button>
+        </div>
+        <input type="file" id="file-calls" accept=".ndjson,.jsonl,.json,.txt" />
+        <button id="btn-upload-calls" class="btn btn-primary btn-sm">
+          上传并计算覆盖</button>
+        <button id="btn-delete-calls" class="btn btn-ghost btn-sm" hidden>
+          删除该侧覆盖</button>
+        <span id="coverage-upload-error" class="error-text"></span>
+        <span id="coverage-meta" class="hint" style="margin:0"></span>
+      </div>
+
+      <div id="coverage-empty" class="hint" style="margin-top:14px">
+        尚未为该侧上传调用记录。
+      </div>
+
+      <div id="coverage-body" hidden>
+        <div class="summary-cards coverage-cards">
+          <div class="stat stat-compatible">
+            <span class="stat-num" id="cov-cells">0/0</span>
+            <span class="stat-label">已覆盖格 / 总格</span>
+          </div>
+          <div class="stat stat-breaking">
+            <span class="stat-num" id="cov-gaps">0</span>
+            <span class="stat-label">缺口格</span>
+          </div>
+          <div class="stat stat-eng">
+            <span class="stat-num" id="cov-covered-calls">0</span>
+            <span class="stat-label">覆盖成功调用行</span>
+          </div>
+          <div class="stat stat-undetermined">
+            <span class="stat-num" id="cov-undetermined-calls">0</span>
+            <span class="stat-label">无法判定行</span>
+          </div>
+          <div class="stat stat-breaking">
+            <span class="stat-num" id="cov-invalid-calls">0</span>
+            <span class="stat-label">校验失败行</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num" id="cov-unmatched-calls">0</span>
+            <span class="stat-label">未匹配 / 排除行</span>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <div class="filters" role="group" aria-label="按操作筛选">
+            <label><input type="checkbox" id="cov-hide-covered" />
+              仅看有缺口 / 无适用格的 operation</label>
+            <input type="text" id="cov-filter-text"
+                   placeholder="按路径 / 媒体类型 / 原因过滤…" />
+          </div>
+        </div>
+
+        <h3 class="cov-h3">覆盖矩阵（operation × 状态码 × JSON 媒体类型）</h3>
+        <div id="cov-operations" class="cov-ops"></div>
+
+        <h3 class="cov-h3">逐行结论</h3>
+        <div class="filters" style="margin-bottom:8px">
+          <label><input type="checkbox" class="cov-rowf" value="covered" />
+            已覆盖</label>
+          <label><input type="checkbox" class="cov-rowf" value="invalid" />
+            校验失败</label>
+          <label><input type="checkbox" class="cov-rowf" value="undetermined" />
+            无法判定</label>
+          <label><input type="checkbox" class="cov-rowf" value="unmatched" />
+            未匹配 / 排除</label>
+        </div>
+        <div id="cov-rows" class="cov-rows"></div>
+      </div>
+    </section>
   </main>
 
   <!-- ===================== finding drawer ===================== -->

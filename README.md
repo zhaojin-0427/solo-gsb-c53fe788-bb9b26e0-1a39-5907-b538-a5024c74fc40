@@ -29,6 +29,11 @@ requestBody 被删除（`PARAMETER_MADE_REQUIRED` / `PARAMETER_ADDED_REQUIRED` /
 - `pattern`、`not`、`if/then/else`、`contains`、`prefixItems` 等
   **未支持的关键字一律标记为“无法判定”**，绝不静默忽略；
 - 结果可按严重度（破坏性 / 无法判定 / 兼容）筛选，按端点分组或扁平浏览；
+- **调用覆盖视图**：选基线或候选文档上传 **NDJSON** 调用记录，先精确路径、
+  再唯一模板归并 operation（多模板命中记未归属），按“状态键 × JSON 媒体类型”
+  组成覆盖格，仅当请求参数 / 请求体 / 响应体的可判定约束全部通过才覆盖该格；
+  页面展示已覆盖格/总格、零分母“无适用格”与逐行原因，结果随分析持久化并
+  确定性导出 JSON；
 - **确定性 JSON 导出**（键排序、无多余空白），响应头携带 SHA-256 指纹；
 - PostgreSQL 持久化分析记录与原始文档包（用于反例重放）；数据库不可用时
   自动降级为进程内存储；
@@ -89,12 +94,136 @@ pytest -q
 | `GET` | `/api/analyses/{id}/export?severity=breaking,undetermined` | 确定性 JSON 导出（可按严重度筛选） |
 | `POST` | `/api/analyses/{id}/findings/{fid}/replay` | 对反例（可在 body 中用 `{"instance": ...}` 覆盖）做双侧校验重放 |
 | `DELETE` | `/api/analyses/{id}` | 删除分析 |
+| `POST` | `/api/analyses/{id}/coverage/{side}` | multipart 上传 `calls`（NDJSON），计算并保存 `side=baseline|candidate` 的调用覆盖 |
+| `GET` | `/api/analyses/{id}/coverage` | 列出已上传覆盖的文档侧 |
+| `GET` | `/api/analyses/{id}/coverage/{side}` | 获取某一侧的覆盖结果 |
+| `GET` | `/api/analyses/{id}/coverage/{side}/export` | 确定性导出覆盖 JSON（`X-Coverage-Fingerprint` 头携带 SHA-256） |
+| `DELETE` | `/api/analyses/{id}/coverage/{side}` | 删除某一侧的覆盖结果 |
 | `GET` | `/api/health` | 服务与存储状态 |
 
 导出响应头：
 
 - `Content-Disposition: attachment; filename="contract-report-<id>-<severity>.json"`
 - `X-Report-Fingerprint: <sha256>`（与导出字节一一对应，可用于校验确定性）
+
+## 调用覆盖（Call Coverage）
+
+在比对结果下方的“**3. 调用覆盖**”面板，选择**基线**或**候选**文档侧，
+上传一份 **NDJSON** 调用记录（每行一次独立调用），工作台现场依据所选文档
+重新推导 operation 与 schema 约束，给出每个 operation 的覆盖格与逐行原因；
+结果随分析保存（PostgreSQL 或内存降级存储），可重复上传覆盖、可确定性导出。
+
+### NDJSON 每行格式
+
+顶层字段：`method`、`path`（具体请求路径，不含 query string）、`query`、
+`headers`、`cookies`（均为对象，可省略）；`request` / `response` 为对象，
+含 `media_type` 与 JSON `body`，`response` 还必须含整数 `status`。
+**缺省 `body` 表示该请求/响应无实体**（HTTP 无 content）。
+
+仓库自带可直接上传基线的示例：[`examples/calls-baseline.ndjson`](examples/calls-baseline.ndjson)。
+
+```json
+{"method":"get","path":"/pets","query":{"status":"available","limit":10},"headers":{},"cookies":{},"response":{"status":200,"media_type":"application/json","body":[{"id":1,"name":"Rex","status":"available"}]}}
+{"method":"get","path":"/pets/7","response":{"status":404}}
+{"method":"post","path":"/pets","request":{"media_type":"application/json","body":{"name":"Doggo"}},"response":{"status":201,"media_type":"application/json","body":{"id":9,"name":"Doggo"}}}
+```
+
+### 归并与建格规则
+
+1. **路径归并**：先匹配**精确路径**（如 `/pets`），未命中再匹配**唯一**路径
+   模板（如 `/pets/{petId}`，正则 `[^/]+` 提取路径参数）；同一具体路径同时
+   命中多个模板时记为**未归属**（`ambiguous_template`），不计入任何 operation；
+   无任何命中记 `path_not_matched`。
+2. **覆盖格**：每个 operation 的格由响应状态键 × JSON 媒体类型组成：
+   - 状态键：响应实际 `status` 依次匹配精确值（`200`）→ 范围键
+     （`2XX`，按百位归类）→ `default`；都不匹配记 `status_not_declared`；
+   - `content` 为空的响应单列一个“**无实体**”格（媒体类型显示 `∅`）；
+   - 仅 `application/json` 与 `*+json` 建格；`text/plain` 等**非 JSON
+     媒体排除**（operation 下列出“非 JSON 媒体（不建格）”）；整个 operation
+     没有可建格时标记“**无适用格**”，分母为零、不计入覆盖率。
+3. **覆盖判定**：仅当一次调用在**请求参数、请求体、响应体**三个位置的所有
+   **可判定**约束均通过时，对应格才标记为已覆盖：
+   - query/header/cookie/path 参数按声明 schema 校验（传输层字符串会按
+     `integer/number/boolean` 尝试还原）；缺失必填参数记校验失败；
+   - 请求体按 `request.media_type` 对应媒体的 schema 校验；声明必填 requestBody
+     但调用无实体记校验失败；请求媒体非 JSON 记**无法判定**；
+   - 响应体按格媒体的 schema 校验；声明 JSON 实体但调用无实体（或缺
+     `media_type`）记校验失败；无实体格携带实体同样记校验失败；
+   - schema 含未支持关键字（`pattern` 等）、`$ref` 不可解析或循环引用，
+     且该片段被本次载荷实际触达时，记**无法判定**（不覆盖格，也不谎称通过）；
+     未触达的可选属性不影响判定。
+4. **逐行原因**：每行给出 `covered / invalid / undetermined / unmatched`
+   结论与原因码（如 `missing_required_parameter`、`request_body_invalid`、
+   `parameter_schema_undecidable`、`ambiguous_template`、
+   `status_media_not_json` 等）及中文说明，页面可按结论筛选、按路径/原因搜索。
+
+### HTTP 调用示例
+
+上传（multipart 字段名固定为 `calls`）：
+
+```bash
+curl -s -X POST "http://localhost:8000/api/analyses/$AID/coverage/baseline" \
+  -F "calls=@examples/calls-baseline.ndjson;type=application/x-ndjson"
+```
+
+返回 `201`（节选）：
+
+```json
+{
+  "schema_version": "1.0",
+  "side": "baseline",
+  "analysis_id": "f4f8e10573d05dfb",
+  "source": {"filename": "calls-baseline.ndjson", "sha256": "…", "non_empty_lines": 9},
+  "summary": {
+    "calls_total": 9, "covered": 6, "unmatched": 1, "invalid": 2,
+    "undetermined": 0, "operations_total": 5, "operations_applicable": 5,
+    "cells_total": 7, "cells_covered": 6, "gaps_total": 1
+  },
+  "operations": [
+    {"method": "GET", "path": "/pets/{petId}", "operation_id": "getPet",
+     "applicable": true, "cells_total": 2, "cells_covered": 2,
+     "cells": [
+       {"status_key": "200", "status_kind": "exact",
+        "media_type": "application/json", "has_content": true,
+        "covered": true, "covered_by": [{"line": 2, "status": 200}]},
+       {"status_key": "404", "status_kind": "exact",
+        "media_type": null, "has_content": false,
+        "covered": true, "covered_by": [{"line": 3, "status": 404}]}
+     ],
+     "excluded_media": [], "gaps": []}
+  ],
+  "rows": [
+    {"line": 1, "outcome": "covered", "method": "GET", "path": "/pets",
+     "operation": {"method": "GET", "path": "/pets"},
+     "status": 200, "status_key": "200",
+     "media_type": "application/json", "cell": "200|application/json",
+     "reasons": []},
+    {"line": 8, "outcome": "invalid", "method": "GET", "path": "/pets/999",
+     "operation": {"method": "GET", "path": "/pets/{petId}"},
+     "status": 200, "status_key": "200", "reasons": [
+       {"code": "parameter_invalid",
+        "message": "路径参数 'petId'='999'：… 类型 string 不被允许 ['integer']",
+        "parameter": "petId", "location": "path"},
+       {"code": "response_body_invalid",
+        "message": "200 响应体不满足 application/json schema: …",
+        "media_type": "application/json", "status_key": "200"}]}
+  ]
+}
+```
+
+查询 / 导出 / 删除：
+
+```bash
+curl -s "http://localhost:8000/api/analyses/$AID/coverage"
+curl -s "http://localhost:8000/api/analyses/$AID/coverage/baseline"
+curl -s -D - "http://localhost:8000/api/analyses/$AID/coverage/baseline/export" \
+  -o call-coverage-baseline.json   # X-Coverage-Fingerprint: <sha256>
+curl -s -X DELETE "http://localhost:8000/api/analyses/$AID/coverage/baseline"
+```
+
+导出字节确定（键排序、无多余空白、无时间戳）：同一份 NDJSON 与文档反复导出
+字节一致，`X-Coverage-Fingerprint` 为导出字节的 SHA-256。
+
 
 ## 判定规则（方向：基线 → 候选）
 
@@ -182,14 +311,15 @@ app/
     endpointrequest.py   # 端点级最小 JSON 请求构造与基线请求约束核对
     structuralreplay.py  # 结构性 finding（参数/请求体/状态码/媒体类型增删）的结构化反例与语义重放
     comparator.py        # 兼容性比较引擎与最小反例综合
+    coverage.py          # 调用覆盖：NDJSON 归并、覆盖格、约束核对与确定性导出
     replay.py            # 双侧重放校验（模式级 + 端点级）
     rules.py             # 规则目录与严重度
   analysis.py            # 编排：加载→比较→序列化→存储
   serialization.py       # 确定性 JSON 导出
   db.py / store.py       # PostgreSQL 持久化 + 内存降级
   static/                # 原生 JS 前端（无框架、无构建步骤）
-examples/                # 基线 / 候选示例文档包
-tests/                   # pytest（引擎/循环 27 项 + API 25 项）
+examples/                # 基线 / 候选示例文档包、调用记录 NDJSON 示例
+tests/                   # pytest（引擎/循环/API + 调用覆盖共 70 项）
 ```
 
 ## 说明与边界

@@ -1,0 +1,9 @@
+{"method":"get","path":"/pets","query":{"status":"available","limit":10},"headers":{},"cookies":{},"response":{"status":200,"media_type":"application/json","body":[{"id":1,"name":"Rex","status":"available"}]}}
+{"method":"get","path":"/pets/7","headers":{},"cookies":{},"response":{"status":200,"media_type":"application/json","body":{"id":7,"name":"A","status":"sold"}}}
+{"method":"get","path":"/pets/7","response":{"status":404}}
+{"method":"post","path":"/pets","request":{"media_type":"application/json","body":{"name":"Doggo"}},"response":{"status":201,"media_type":"application/json","body":{"id":9,"name":"Doggo","status":"pending"}}}
+{"method":"get","path":"/customers/c-123","response":{"status":200,"media_type":"application/json","body":{"id":"c-123","displayName":"张三","tier":"gold","score":12}}}
+{"method":"post","path":"/legacy/echo","request":{"media_type":"application/json","body":{"message":"hello","n":3}},"response":{"status":200,"media_type":"application/json","body":{"message":"hello","n":3}}}
+{"method":"get","path":"/pets","query":{"status":"available"},"response":{"status":200,"media_type":"application/json","body":[{"id":"oops"}]}}
+{"method":"get","path":"/pets/999","response":{"status":200,"media_type":"application/json","body":{"id":"x"}}}
+{"method":"get","path":"/unknown/path","response":{"status":500}}

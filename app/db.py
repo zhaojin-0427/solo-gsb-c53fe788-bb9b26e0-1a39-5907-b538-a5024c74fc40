@@ -34,6 +34,17 @@ CREATE TABLE IF NOT EXISTS analysis_packages (
     baseline    JSONB NOT NULL,
     candidate   JSONB NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS analysis_coverage (
+    analysis_id TEXT NOT NULL
+                REFERENCES analyses(id) ON DELETE CASCADE,
+    side        TEXT NOT NULL,
+    doc         JSONB NOT NULL,
+    filename    TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (analysis_id, side)
+);
 """
 
 
@@ -201,6 +212,90 @@ class Database:
 
     def status(self) -> dict:
         return {"available": self.available, "error": self.last_error}
+
+    # ---------------------------------------------------------- coverage
+    def save_coverage(self, analysis_id: str, side: str, doc: dict,
+                      filename: Optional[str], timestamp: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO analysis_coverage
+                            (analysis_id, side, doc, filename, created_at,
+                             updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (analysis_id, side) DO UPDATE SET
+                            doc = EXCLUDED.doc,
+                            filename = EXCLUDED.filename,
+                            updated_at = EXCLUDED.updated_at
+                        """,
+                        (analysis_id, side, Json(doc), filename, timestamp,
+                         timestamp))
+                conn.commit()
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+
+    def get_coverage(self, analysis_id: str,
+                     side: str) -> Optional[dict[str, Any]]:
+        if not self.available:
+            return None
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT doc, filename, created_at, updated_at "
+                        "FROM analysis_coverage "
+                        "WHERE analysis_id = %s AND side = %s",
+                        (analysis_id, side))
+                    r = cur.fetchone()
+            if not r:
+                return None
+            return {"doc": r[0], "filename": r[1],
+                    "created_at": r[2].isoformat() if r[2] else None,
+                    "updated_at": r[3].isoformat() if r[3] else None}
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+    def list_coverage(self, analysis_id: str) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT side, filename, created_at, updated_at "
+                        "FROM analysis_coverage WHERE analysis_id = %s "
+                        "ORDER BY side", (analysis_id,))
+                    rows = cur.fetchall()
+            return [{"side": r[0], "filename": r[1],
+                     "created_at": r[2].isoformat() if r[2] else None,
+                     "updated_at": r[3].isoformat() if r[3] else None}
+                    for r in rows]
+        except Exception as exc:
+            self.last_error = str(exc)
+            return []
+
+    def delete_coverage(self, analysis_id: str, side: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM analysis_coverage "
+                        "WHERE analysis_id = %s AND side = %s",
+                        (analysis_id, side))
+                conn.commit()
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
 
 
 db = Database()

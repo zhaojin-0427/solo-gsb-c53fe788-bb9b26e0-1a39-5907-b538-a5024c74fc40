@@ -17,6 +17,7 @@ class _MemoryStore:
         self._lock = threading.Lock()
         self._analyses: dict[str, dict] = {}
         self._packages: dict[str, dict] = {}
+        self._coverage: dict[tuple[str, str], dict] = {}
 
     @property
     def available(self) -> bool:
@@ -58,6 +59,38 @@ class _MemoryStore:
             existed = analysis_id in self._analyses
             self._analyses.pop(analysis_id, None)
             self._packages.pop(analysis_id, None)
+            for key in [k for k in self._coverage if k[0] == analysis_id]:
+                self._coverage.pop(key, None)
+        return existed
+
+    def save_coverage(self, analysis_id: str, side: str, doc: dict,
+                      filename: str | None, timestamp: str) -> bool:
+        with self._lock:
+            existed = (analysis_id, side) in self._coverage
+            created_at = self._coverage[(analysis_id, side)]["created_at"] \
+                if existed else timestamp
+            self._coverage[(analysis_id, side)] = {
+                "doc": doc, "filename": filename,
+                "created_at": created_at, "updated_at": timestamp}
+        return True
+
+    def get_coverage(self, analysis_id: str, side: str):
+        with self._lock:
+            rec = self._coverage.get((analysis_id, side))
+            return dict(rec) if rec else None
+
+    def list_coverage(self, analysis_id: str):
+        with self._lock:
+            return [{"side": side, "filename": rec["filename"],
+                     "created_at": rec["created_at"],
+                     "updated_at": rec["updated_at"]}
+                    for (aid, side), rec in sorted(self._coverage.items())
+                    if aid == analysis_id]
+
+    def delete_coverage(self, analysis_id: str, side: str) -> bool:
+        with self._lock:
+            existed = (analysis_id, side) in self._coverage
+            self._coverage.pop((analysis_id, side), None)
         return existed
 
 
@@ -130,6 +163,33 @@ class Store:
         if self.db.available:
             return self.db.delete_analysis(analysis_id)
         return _memory.delete(analysis_id)
+
+    def save_coverage(self, *, analysis_id: str, side: str, doc: dict,
+                      filename: str | None, created_at: str) -> None:
+        if self.db.available:
+            ok = self.db.save_coverage(analysis_id, side, doc, filename,
+                                       created_at)
+            if not ok and not self.db.available:
+                _memory.save_coverage(analysis_id, side, doc, filename,
+                                      created_at)
+        else:
+            _memory.save_coverage(analysis_id, side, doc, filename,
+                                  created_at)
+
+    def get_coverage(self, analysis_id: str, side: str):
+        if self.db.available:
+            return self.db.get_coverage(analysis_id, side)
+        return _memory.get_coverage(analysis_id, side)
+
+    def list_coverage(self, analysis_id: str):
+        if self.db.available:
+            return self.db.list_coverage(analysis_id)
+        return _memory.list_coverage(analysis_id)
+
+    def delete_coverage(self, analysis_id: str, side: str) -> bool:
+        if self.db.available:
+            return self.db.delete_coverage(analysis_id, side)
+        return _memory.delete_coverage(analysis_id, side)
 
 
 store = Store()

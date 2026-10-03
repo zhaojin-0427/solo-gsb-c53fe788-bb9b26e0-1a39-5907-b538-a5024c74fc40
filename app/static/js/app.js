@@ -9,6 +9,9 @@ const state = {
   severities: new Set(["breaking", "undetermined"]),
   text: "",
   findingsById: new Map(),
+  coverage: null,
+  coverageSide: "baseline",
+  coverageFilter: new Set(["covered", "invalid", "undetermined", "unmatched"]),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -53,6 +56,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#history-close").addEventListener("click", closeHistory);
   $("#drawer-close").addEventListener("click", closeDrawer);
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
+  initCoverage();
   refreshHealth();
 });
 
@@ -125,6 +129,7 @@ function loadReport(doc) {
   $("#fingerprint").textContent = doc.fingerprint || "";
   render();
   $("#panel-result").scrollIntoView({ behavior: "smooth", block: "start" });
+  loadCoverageForAnalysis();
 }
 
 // ------------------------------------------------------------- render
@@ -654,4 +659,334 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
+}
+
+// ============================================================ call coverage
+const covOutcomeLabel = {
+  covered: "已覆盖", invalid: "校验失败", undetermined: "无法判定",
+  unmatched: "未匹配/排除",
+};
+const covReasonHints = {
+  malformed_json: "该行 JSON 解析失败",
+  missing_method: "缺少 method",
+  invalid_method: "method 不是合法 HTTP 方法",
+  missing_path: "缺少以 / 开头的 path",
+  malformed_field: "字段结构不合法",
+  missing_response: "缺少 response",
+  missing_status: "缺少 response.status",
+  invalid_status: "status 不在 100-599",
+  path_not_matched: "路径不匹配任何 operation",
+  ambiguous_template: "路径同时命中多个模板（未归属）",
+  status_not_declared: "状态码无对应精确/范围/default 声明",
+  status_media_not_json: "该状态码仅声明非 JSON 媒体（排除）",
+  response_media_not_json: "响应媒体非 JSON（排除）",
+  response_media_not_declared: "响应媒体未在该状态码声明",
+  response_media_missing: "有响应实体但缺少 media_type",
+  response_entity_expected: "声明 JSON 实体但调用无实体",
+  response_entity_mismatch: "声明无实体但调用返回实体",
+  missing_required_parameter: "缺少必填参数",
+  parameter_invalid: "参数不满足 schema",
+  parameter_schema_undecidable: "参数 schema 无法判定",
+  request_body_undeclared: "未声明 requestBody 却携带实体",
+  request_media_not_json: "请求媒体非 JSON，无法判定请求体",
+  request_media_not_declared: "请求媒体未声明",
+  request_body_invalid: "请求体不满足 schema",
+  request_body_schema_undecidable: "请求体 schema 无法判定",
+  missing_required_request_body: "缺少必填请求体",
+  response_body_invalid: "响应体不满足 schema",
+  response_body_schema_undecidable: "响应体 schema 无法判定",
+};
+
+function initCoverage() {
+  $$(".cside").forEach((b) => b.addEventListener("click", () => {
+    $$(".cside").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    state.coverageSide = b.dataset.side;
+    loadCoverageDoc();
+  }));
+  $("#btn-upload-calls").addEventListener("click", uploadCoverage);
+  $("#btn-delete-calls").addEventListener("click", deleteCoverage);
+  $("#btn-export-coverage").addEventListener("click", () => {
+    if (!state.coverage) return;
+    const a = document.createElement("a");
+    a.href = `/api/analyses/${state.analysisId}/coverage/`
+      + `${state.coverageSide}/export`;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  $("#cov-hide-covered").addEventListener("change", renderCoverage);
+  $("#cov-filter-text").addEventListener("input", () => {
+    renderCoverageOperations();
+    renderCoverageRows();
+  });
+  $$(".cov-rowf").forEach((cb) => {
+    cb.checked = state.coverageFilter.has(cb.value);
+    cb.addEventListener("change", () => {
+      state.coverageFilter = new Set(
+        $$(".cov-rowf").filter((x) => x.checked).map((x) => x.value));
+      renderCoverageRows();
+    });
+  });
+  $("#panel-coverage").hidden = true;
+}
+
+async function loadCoverageForAnalysis() {
+  $("#panel-coverage").hidden = false;
+  $("#coverage-sub").textContent = "#" + state.analysisId;
+  // discover which sides already have stored coverage, keep current selection
+  try {
+    const data = await (await fetch(
+      `/api/analyses/${state.analysisId}/coverage`)).json();
+    const sides = (data.items || []).map((x) => x.side);
+    if (!sides.includes(state.coverageSide) && sides.length) {
+      state.coverageSide = sides[0];
+    }
+  } catch { /* listing is best-effort */ }
+  $$(".cside").forEach((b) =>
+    b.classList.toggle("active", b.dataset.side === state.coverageSide));
+  await loadCoverageDoc();
+}
+
+async function loadCoverageDoc() {
+  const errEl = $("#coverage-upload-error");
+  errEl.textContent = "";
+  state.coverage = null;
+  try {
+    const resp = await fetch(
+      `/api/analyses/${state.analysisId}/coverage/${state.coverageSide}`);
+    if (resp.status === 404) {
+      renderCoverage();
+      return;
+    }
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.detail || `HTTP ${resp.status}`);
+    }
+    state.coverage = await resp.json();
+  } catch (exc) {
+    errEl.textContent = "加载覆盖结果失败：" + exc.message;
+  }
+  renderCoverage();
+}
+
+async function uploadCoverage() {
+  const input = $("#file-calls");
+  const errEl = $("#coverage-upload-error");
+  errEl.textContent = "";
+  if (!input.files[0]) {
+    errEl.textContent = "请先选择 NDJSON 调用记录文件";
+    return;
+  }
+  const btn = $("#btn-upload-calls");
+  btn.disabled = true;
+  btn.textContent = "计算中…";
+  try {
+    const fd = new FormData();
+    fd.append("calls", input.files[0]);
+    const resp = await fetch(
+      `/api/analyses/${state.analysisId}/coverage/${state.coverageSide}`,
+      { method: "POST", body: fd });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.detail || `HTTP ${resp.status}`);
+    }
+    state.coverage = await resp.json();
+    renderCoverage();
+  } catch (exc) {
+    errEl.textContent = "上传/计算失败：" + exc.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "上传并计算覆盖";
+  }
+}
+
+async function deleteCoverage() {
+  const errEl = $("#coverage-upload-error");
+  try {
+    const resp = await fetch(
+      `/api/analyses/${state.analysisId}/coverage/${state.coverageSide}`,
+      { method: "DELETE" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    state.coverage = null;
+    renderCoverage();
+  } catch (exc) {
+    errEl.textContent = "删除失败：" + exc.message;
+  }
+}
+
+// ------------------------------------------------------------- rendering
+function renderCoverage() {
+  const doc = state.coverage;
+  $("#coverage-empty").hidden = !!doc;
+  $("#coverage-body").hidden = !doc;
+  $("#btn-export-coverage").disabled = !doc;
+  $("#btn-delete-calls").hidden = !doc;
+  const meta = $("#coverage-meta");
+  if (!doc) {
+    meta.textContent = "";
+    return;
+  }
+  const s = doc.summary;
+  $("#cov-cells").textContent = `${s.cells_covered}/${s.cells_total}`;
+  $("#cov-gaps").textContent = s.gaps_total;
+  $("#cov-covered-calls").textContent = s.covered;
+  $("#cov-undetermined-calls").textContent = s.undetermined;
+  $("#cov-invalid-calls").textContent = s.invalid;
+  $("#cov-unmatched-calls").textContent = s.unmatched;
+  const src = doc.source || {};
+  meta.innerHTML = `<code>${escapeHtml(src.filename || "")}</code> · 侧：${
+    doc.side === "baseline" ? "基线" : "候选"} · SHA-256 <code>${
+    escapeHtml((src.sha256 || "").slice(0, 16))}…</code> · ${
+    src.non_empty_lines ?? s.calls_total} 行`;
+  renderCoverageOperations();
+  renderCoverageRows();
+}
+
+function renderCoverageOperations() {
+  const box = $("#cov-operations");
+  const doc = state.coverage;
+  const hideCovered = $("#cov-hide-covered").checked;
+  const text = $("#cov-filter-text").value.trim().toLowerCase();
+  box.innerHTML = "";
+  const ops = doc.operations.filter((op) => {
+    if (hideCovered && op.cells_total > 0
+        && op.cells_covered === op.cells_total) return false;
+    if (!text) return true;
+    const hay = [op.method, op.path, op.operation_id || "",
+      ...op.cells.map((c) => c.status_key + " " + (c.media_type || "")),
+      ...(op.excluded_media || []).flatMap((e) => e.media_types)]
+      .join(" ").toLowerCase();
+    return hay.includes(text);
+  });
+  if (!ops.length) {
+    box.innerHTML = `<p class="hint">当前筛选下没有 operation。</p>`;
+    return;
+  }
+  for (const op of ops) {
+    const div = document.createElement("div");
+    div.className = "cov-op";
+    if (!op.applicable) {
+      div.innerHTML = `
+        <div class="cov-op-head">
+          <span class="cov-chevron">▶</span>
+          <span class="method ${methodClass(op.method)}">${op.method}</span>
+          <span class="cov-op-title">${escapeHtml(op.path)}</span>
+          <span class="count-pill sev-undetermined">无适用格</span>
+        </div>
+        <div class="cov-op-body">
+          <div class="cov-na">该 operation 没有可覆盖格：所有响应都未声明 JSON 内容，
+            或仅声明非 JSON 媒体类型（已排除）。分母为零，不计入覆盖率。</div>
+          ${(op.excluded_media || []).length ? excludedHtml(op) : ""}
+        </div>`;
+    } else {
+      const allCovered = op.cells_covered === op.cells_total;
+      const pill = allCovered
+        ? `<span class="count-pill sev-compatible">${op.cells_covered}/${op.cells_total}</span>`
+        : `<span class="count-pill sev-breaking">${op.cells_covered}/${op.cells_total} · 缺口 ${op.gaps.length}</span>`;
+      div.innerHTML = `
+        <div class="cov-op-head">
+          <span class="cov-chevron">▶</span>
+          <span class="method ${methodClass(op.method)}">${op.method}</span>
+          <span class="cov-op-title">${escapeHtml(op.path)}
+            ${op.operation_id ? `<small class="cov-op-sub">${escapeHtml(op.operation_id)}</small>` : ""}
+          </span>
+          ${pill}
+        </div>
+        <div class="cov-op-body">
+          <div class="cov-grid">${gridHtml(op)}</div>
+          ${op.gaps.length
+            ? `<div class="cov-excluded">缺口格：${op.gaps.map(escapeHtml)
+                .join("，")}</div>`
+            : `<div class="cov-cell-yes">✓ 该 operation 的所有格均已覆盖</div>`}
+          ${(op.excluded_media || []).length ? excludedHtml(op) : ""}
+        </div>`;
+    }
+    div.querySelector(".cov-op-head").addEventListener("click", () =>
+      div.classList.toggle("open"));
+    box.appendChild(div);
+  }
+}
+
+function excludedHtml(op) {
+  const items = (op.excluded_media || []).map((e) =>
+    `${e.status_key}: ${e.media_types.join(", ")}`).join("；");
+  return `<div class="cov-excluded">非 JSON 媒体（不建格）：${escapeHtml(items)}</div>`;
+}
+
+function gridHtml(op) {
+  const head = `<tr><th>状态键</th><th>匹配</th><th>JSON 媒体类型</th>
+    <th>实体</th><th>状态</th><th>命中行</th></tr>`;
+  const rows = op.cells.map((c) => {
+    const lines = (c.covered_by || []).map((b) => `L${b.line}`).join(", ");
+    return `<tr>
+      <td><code>${escapeHtml(c.status_key)}</code></td>
+      <td class="cov-cell-na">${statusKindText(c.status_kind)}</td>
+      <td>${c.media_type ? `<code>${escapeHtml(c.media_type)}</code>`
+        : '<span class="cov-cell-na">— 无 content —</span>'}</td>
+      <td class="cov-cell-na">${c.has_content ? "有实体" : "无实体"}</td>
+      <td>${c.covered
+        ? '<span class="cov-cell-yes">✓ 已覆盖</span>'
+        : '<span class="cov-cell-no">✗ 缺口</span>'}</td>
+      <td class="cov-lines">${escapeHtml(lines)}</td>
+    </tr>`;
+  }).join("");
+  return `<table class="cov-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+}
+
+function statusKindText(kind) {
+  return { exact: "精确值", range: "范围", default: "default" }[kind] || kind;
+}
+
+function renderCoverageRows() {
+  const box = $("#cov-rows");
+  if (!state.coverage) { box.innerHTML = ""; return; }
+  const text = ($("#cov-filter-text").value || "").trim().toLowerCase();
+  const rows = state.coverage.rows.filter((r) => {
+    if (!state.coverageFilter.has(r.outcome)) return false;
+    if (!text) return true;
+    const hay = [r.line, r.method, r.path, r.cell, r.status_key,
+      ...r.reasons.map((x) => x.code + " " + x.message)]
+      .join(" ").toLowerCase();
+    return hay.includes(text);
+  });
+  if (!rows.length) {
+    box.innerHTML = `<p class="hint">当前筛选下没有调用行。</p>`;
+    return;
+  }
+  box.innerHTML = "";
+  for (const r of rows) {
+    const div = document.createElement("div");
+    div.className = "cov-row";
+    const opTxt = r.operation
+      ? `${r.operation.method} ${r.operation.path}` : "—";
+    div.innerHTML = `
+      <div class="cov-row-head">
+        <span class="cov-line-no">L${r.line}</span>
+        <span class="cov-out-${r.outcome}">${covOutcomeLabel[r.outcome]}</span>
+        <span class="method ${methodClass(r.method)}">${escapeHtml(r.method || "?")}</span>
+        <span class="cov-row-main">${escapeHtml(r.path || "（无 path）")}
+          ${r.status ? `→ ${r.status}` : ""}
+          ${r.cell ? `· <code>${escapeHtml(r.cell)}</code>` : ""}</span>
+        <span class="cov-cell-tag">${escapeHtml(opTxt)}</span>
+      </div>
+      <div class="cov-row-detail">
+        <ul class="cov-reasons">
+          ${r.reasons.length
+            ? r.reasons.map((x) => `<li><span class="cov-reason-code">${
+                escapeHtml(x.code)}</span> — ${escapeHtml(x.message)}
+                ${hintFor(x.code)}</li>`).join("")
+            : '<li class="cov-cell-yes">所有可判定约束通过，覆盖对应格</li>'}
+        </ul>
+      </div>`;
+    div.querySelector(".cov-row-head").addEventListener("click", () =>
+      div.classList.toggle("open"));
+    box.appendChild(div);
+  }
+}
+
+function hintFor(code) {
+  const h = covReasonHints[code];
+  return h ? `<small class="cov-op-sub">（${escapeHtml(h)}）</small>` : "";
 }
